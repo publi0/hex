@@ -83,7 +83,64 @@ impl StepReport {
 
     /// Sum reported costs, then estimates for requests that reported none,
     /// marking estimates and incomplete coverage explicitly.
+    #[cfg(test)]
     pub fn cost_summary(&self) -> String {
+        match self.cost() {
+            Err(message) => message.into(),
+            Ok(cost) => {
+                let amount = if cost.estimated {
+                    tf!("≈ {cost} (estimated)", cost = format_cost(cost.sum))
+                } else {
+                    format_cost(cost.sum)
+                };
+                if cost.counted == cost.total {
+                    amount
+                } else {
+                    tf!(
+                        "{amount} · partial ({count} of {total} attempts)",
+                        amount = amount,
+                        count = cost.counted,
+                        total = cost.total
+                    )
+                }
+            }
+        }
+    }
+
+    /// The History cost tile: a short amount (its label names the currency)
+    /// and what qualifies it, so the estimate mark never truncates away.
+    pub fn cost_tile(&self) -> (String, Option<String>) {
+        match self.cost() {
+            Err(message) => ("—".into(), Some(message.into())),
+            Ok(cost) => {
+                let amount = crate::i18n::decimal(format_usd(cost.sum));
+                let partial = (cost.counted != cost.total).then(|| {
+                    tf!(
+                        "{count} of {total} attempts",
+                        count = cost.counted,
+                        total = cost.total
+                    )
+                });
+                if cost.estimated {
+                    let estimated = t("Estimated from list prices").to_owned();
+                    (
+                        format!("≈ {amount}"),
+                        Some(match partial {
+                            Some(partial) => format!("{estimated} · {partial}"),
+                            None => estimated,
+                        }),
+                    )
+                } else {
+                    (
+                        amount,
+                        partial.map(|partial| tf!("Partial: {partial}", partial = partial)),
+                    )
+                }
+            }
+        }
+    }
+
+    fn cost(&self) -> Result<CostSum, &'static str> {
         let mut estimated = false;
         let costs: Vec<_> = self
             .executions
@@ -101,30 +158,21 @@ impl StepReport {
             .len()
             .saturating_add(self.omitted_executions);
         if total == 0 {
-            return t("Not recorded").into();
+            return Err(t("Not recorded"));
         }
         if costs.is_empty() {
-            return t("Not reported").into();
+            return Err(t("Not reported"));
         }
         let sum: f64 = costs.iter().sum();
         if !sum.is_finite() {
-            return t("Exceeds display range; see individual attempts").into();
+            return Err(t("Exceeds display range; see individual attempts"));
         }
-        let amount = if estimated {
-            tf!("≈ {cost} (estimated)", cost = format_cost(sum))
-        } else {
-            format_cost(sum)
-        };
-        if costs.len() == total {
-            amount
-        } else {
-            tf!(
-                "{amount} · partial ({count} of {total} attempts)",
-                amount = amount,
-                count = costs.len(),
-                total = total
-            )
-        }
+        Ok(CostSum {
+            sum,
+            estimated,
+            counted: costs.len(),
+            total,
+        })
     }
 
     /// Every request in order, labelled by why it was sent, for the History detail view.
@@ -137,7 +185,7 @@ impl StepReport {
                     let model = crate::providers::ModelRef::parse(request.model);
                     AttemptView {
                         provider: model.provider.label().into(),
-                        model: model.model.into(),
+                        model: model_name(model.provider.id(), model.model),
                         streaming: None,
                         keyword_count: None,
                         succeeded: request.succeeded,
@@ -151,7 +199,7 @@ impl StepReport {
                 .iter()
                 .map(|execution| AttemptView {
                     provider: provider_label(&execution.provider),
-                    model: execution.model.clone(),
+                    model: model_name(&execution.provider, &execution.model),
                     streaming: Some(execution.streaming),
                     keyword_count: Some(execution.keyword_count),
                     succeeded: execution.outcome == "success",
@@ -287,6 +335,13 @@ impl AttemptStep {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct CostSum {
+    sum: f64,
+    estimated: bool,
+    counted: usize,
+    total: usize,
+}
+
 pub struct AttemptView {
     pub provider: String,
     pub model: String,
@@ -324,6 +379,14 @@ pub fn duration_label(ms: u64) -> String {
         1_000..=9_999 => crate::i18n::decimal(format!("{:.2} s", ms as f64 / 1_000.0)),
         _ => crate::i18n::decimal(format!("{:.1} s", ms as f64 / 1_000.0)),
     }
+}
+
+/// A native model reads with its own name; routes and unknown models keep their ID.
+fn model_name(provider: &str, model: &str) -> String {
+    crate::providers::native_models()
+        .iter()
+        .find(|native| native.provider.id() == provider && native.id == model)
+        .map_or_else(|| model.to_owned(), |native| native.name.to_owned())
 }
 
 fn provider_label(id: &str) -> String {
@@ -621,6 +684,79 @@ mod tests {
         assert_eq!(
             older.estimated_cost_usd, None,
             "old entries are never estimated"
+        );
+    }
+
+    #[test]
+    fn history_cost_tile_keeps_the_amount_short_and_qualifies_it_below() {
+        // The estimate mark used to sit after the amount and was truncated away.
+        let mut live = costs(&[None]);
+        live.executions[0].estimated_cost_usd = Some(0.000_675);
+        assert_eq!(
+            live.cost_tile(),
+            (
+                "≈ $0.000675".into(),
+                Some("Estimated from list prices".into())
+            )
+        );
+        let mut mixed = costs(&[None, None, Some(0.002)]);
+        mixed.executions[1].estimated_cost_usd = Some(0.003);
+        assert_eq!(
+            mixed.cost_tile(),
+            (
+                "≈ $0.005".into(),
+                Some("Estimated from list prices · 2 of 3 attempts".into())
+            )
+        );
+        assert_eq!(
+            costs(&[Some(0.0), None]).cost_tile(),
+            ("$0.00".into(), Some("Partial: 1 of 2 attempts".into()))
+        );
+        assert_eq!(costs(&[Some(0.002)]).cost_tile(), ("$0.002".into(), None));
+        assert_eq!(
+            costs(&[None]).cost_tile(),
+            ("—".into(), Some("Not reported".into()))
+        );
+        assert_eq!(
+            costs(&[]).cost_tile(),
+            ("—".into(), Some("Not recorded".into()))
+        );
+    }
+
+    #[test]
+    fn attempts_name_native_models_and_keep_route_ids() {
+        let report = StepReport {
+            executions: vec![
+                ExecutionReport {
+                    provider: "elevenlabs".into(),
+                    model: "scribe_v2_realtime".into(),
+                    ..Default::default()
+                },
+                ExecutionReport {
+                    provider: "openrouter".into(),
+                    model: "microsoft/mai-transcribe-2".into(),
+                    ..Default::default()
+                },
+                ExecutionReport {
+                    provider: "elevenlabs".into(),
+                    model: "retired-model".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let models: Vec<_> = report
+            .attempts()
+            .into_iter()
+            .map(|attempt| attempt.model)
+            .collect();
+        assert_eq!(
+            models,
+            [
+                "Scribe v2 Realtime",
+                "microsoft/mai-transcribe-2",
+                "retired-model"
+            ]
         );
     }
 

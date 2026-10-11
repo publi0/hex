@@ -1164,20 +1164,13 @@ impl AppWindow {
                                         (crate::openrouter::report::seconds(entry.audio_ms), None)
                                     }),
                             ))
-                            .child(history_tile(t("Cost (USD)"), {
-                                let summary = report.map_or_else(
-                                    || t("Not recorded").to_owned(),
-                                    |report| report.cost_summary(),
-                                );
-                                match summary.split_once(" · ") {
-                                    // The tile label names the currency.
-                                    Some((value, detail)) => (
-                                        value.trim_end_matches(" USD").to_owned(),
-                                        Some(detail.to_owned()),
-                                    ),
-                                    None => (summary.trim_end_matches(" USD").to_owned(), None),
-                                }
-                            })),
+                            .child(history_tile(
+                                t("Cost (USD)"),
+                                report.map_or_else(
+                                    || ("—".into(), Some(t("Not recorded").into())),
+                                    crate::openrouter::StepReport::cost_tile,
+                                ),
+                            )),
                     )
                     .children(
                         report

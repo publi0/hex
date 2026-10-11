@@ -1455,4 +1455,13 @@ pub(super) const CATALOG: &[(&str, &str)] = &[
         "Audio already streamed when a recording is cancelled is usually still billed by the provider.",
         "O áudio já enviado por streaming quando uma gravação é cancelada costuma ser cobrado mesmo assim pelo provedor.",
     ),
+    (
+        "Estimated from list prices",
+        "Estimado pela tabela de preços",
+    ),
+    (
+        "{count} of {total} attempts",
+        "{count} de {total} tentativas",
+    ),
+    ("Partial: {partial}", "Parcial: {partial}"),
 ];
